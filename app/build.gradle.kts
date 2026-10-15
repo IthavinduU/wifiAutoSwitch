@@ -18,8 +18,8 @@ android {
 
     buildTypes {
         release {
-            // Shizuku user service + reflection into framework classes: shrinking is not worth the risk.
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
