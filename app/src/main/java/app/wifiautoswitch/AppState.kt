@@ -23,6 +23,16 @@ object AppState {
 
     /** "Switch now" taps from the app or the Quick Settings tile; handled by the running service. */
     val switchNowRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** Screen to open, e.g. from the "new device" notification (an AppRoot screen name). */
+    val requestedScreen = MutableStateFlow<String?>(null)
+
+    /** Wall-clock start of a no-internet period happening right now, and on which network. */
+    val ongoingOutageSince = MutableStateFlow<Long?>(null)
+    val ongoingOutageNetwork = MutableStateFlow<String?>(null)
+
+    /** Bumped whenever the outage log is saved, so an open log screen reloads. */
+    val outageLogRevision = MutableStateFlow(0)
 }
 
 /**

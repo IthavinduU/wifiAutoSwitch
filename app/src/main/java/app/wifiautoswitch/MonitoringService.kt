@@ -1,8 +1,11 @@
 package app.wifiautoswitch
 
 import android.app.Service
+import android.app.AlarmManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.IBinder
@@ -10,6 +13,8 @@ import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import app.wifiautoswitch.core.Decision
+import app.wifiautoswitch.core.OutageLog
+import app.wifiautoswitch.core.OutageTracker
 import app.wifiautoswitch.core.Role
 import app.wifiautoswitch.core.Snapshot
 import app.wifiautoswitch.core.SwitchingEngine
@@ -37,7 +42,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * No wake locks, no alarms, no busy loops; coroutine delays never wake a sleeping CPU.
  *
  * Extras: waits for calls to end before switching, alerts if Shizuku stops, handles "Switch now"
- * from the app/tile, and feeds free scan readings to the threshold auto-tuner.
+ * from the app/tile, feeds free scan readings to the threshold auto-tuner, logs internet outages,
+ * fails over to the other router when one loses internet, and (only while charging) schedules the
+ * new-device check.
  */
 class MonitoringService : Service() {
 
@@ -53,6 +60,12 @@ class MonitoringService : Service() {
         private const val SAMPLE_MAX_AGE_MS = 10_000L
         /** Shizuku's binder arrives a moment after start-up; don't alert during that window. */
         private const val SHIZUKU_ALERT_GRACE_MS = 10_000L
+        /** No internet for this long on a home network before trying the other one. */
+        private const val FAILOVER_AFTER_MS = 30_000L
+        /** After a failover attempt (worked or not), don't try again for this long. */
+        private const val FAILOVER_PAUSE_MS = 10 * 60_000L
+        private const val FAILOVER_SCAN_GAP_MS = 60_000L
+        private const val FAILOVER_READING_MAX_AGE_MS = 120_000L
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, MonitoringService::class.java))
@@ -97,6 +110,20 @@ class MonitoringService : Service() {
     private var lastShizukuState: ShizukuConnector.State? = null
     private var shizukuAlertJob: Job? = null
     private var lastSampleScanMs = -1L
+
+    private val outageTracker = OutageTracker()
+    private var noInternetSinceMs: Long? = null
+    private var failoverBlockedUntilMs = 0L
+    private var lastFailoverScanMs = 0L
+    private var charging = false
+    private var deviceAlarmSet = false
+
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            charging = intent.action == Intent.ACTION_POWER_CONNECTED
+            updateDeviceCheckAlarm()
+        }
+    }
 
     private val modeListener = AudioManager.OnModeChangedListener { mode ->
         val nowInCall = isCallMode(mode)
@@ -151,6 +178,16 @@ class MonitoringService : Service() {
         Diagnostics.log("Monitoring started")
         Tiles.refresh(this)
 
+        charging = DeviceCheckReceiver.isCharging(this)
+        ContextCompat.registerReceiver(
+            this, powerReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+
         scope.launch { Tuning.load(repo) }
         scope.launch { AppState.switchNowRequests.collect { switchNow() } }
 
@@ -160,6 +197,7 @@ class MonitoringService : Service() {
                 settingsLoaded = true
                 engine.thresholds = s.thresholds()
                 updateShizukuAlert()
+                updateDeviceCheckAlarm()
                 if (!s.autoSwitch) {
                     finalStatus = Status(StatusKind.OFF, "Auto Switch is off")
                     stopSelf()
@@ -181,6 +219,11 @@ class MonitoringService : Service() {
     override fun onDestroy() {
         running = false
         runCatching { audio?.removeOnModeChangedListener(modeListener) }
+        runCatching { unregisterReceiver(powerReceiver) }
+        updateDeviceCheckAlarm() // running is false here, so this cancels the alarm
+        // Close any ongoing outage record cleanly.
+        if (::repo.isInitialized) outageTracker.update(System.currentTimeMillis(), null, false)?.let { saveOutage(it) }
+        AppState.ongoingOutageSince.value = null
         if (::repo.isInitialized) {
             val r = repo
             CoroutineScope(Dispatchers.IO).launch { Tuning.saveIfNeeded(r, force = true) }
@@ -200,6 +243,115 @@ class MonitoringService : Service() {
         mode == AudioManager.MODE_IN_COMMUNICATION ||
         mode == AudioManager.MODE_RINGTONE ||
         mode == AudioManager.MODE_CALL_SCREENING
+
+    /** New-device check alarm: only while Auto Switch runs, the feature is on and the phone is charging. */
+    private fun updateDeviceCheckAlarm() {
+        val am = getSystemService(AlarmManager::class.java) ?: return
+        val pi = DeviceCheckReceiver.pendingIntent(this)
+        val want = running && settingsLoaded && settings.newDeviceAlerts && charging
+        if (want && !deviceAlarmSet) {
+            am.setInexactRepeating(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                SystemClock.elapsedRealtime() + 2 * 60_000L,
+                AlarmManager.INTERVAL_FIFTEEN_MINUTES,
+                pi,
+            )
+            deviceAlarmSet = true
+            Diagnostics.log("Charging: new-device checks every ~15 min")
+        } else if (!want && deviceAlarmSet) {
+            am.cancel(pi)
+            deviceAlarmSet = false
+            Diagnostics.log("New-device checks stopped")
+        }
+    }
+
+    /** Feeds the outage tracker; saves an outage when one ends. Uses wall-clock time for the log. */
+    private fun trackOutage(role: Role?, hasInternet: Boolean) {
+        val nowWall = System.currentTimeMillis()
+        outageTracker.update(nowWall, role?.label, hasInternet)?.let { saveOutage(it) }
+        val since = outageTracker.ongoingSince(nowWall)
+        if (AppState.ongoingOutageSince.value != since) {
+            AppState.ongoingOutageSince.value = since
+            AppState.ongoingOutageNetwork.value = if (since != null) outageTracker.ongoingNetwork else null
+            if (since != null) Diagnostics.log("No internet on ${outageTracker.ongoingNetwork}")
+        }
+    }
+
+    private fun saveOutage(o: app.wifiautoswitch.core.Outage) {
+        Diagnostics.log("Internet outage on ${o.network}: ${app.wifiautoswitch.core.formatDuration(o.durationMs)}")
+        val r = repo
+        CoroutineScope(Dispatchers.IO).launch {
+            r.saveOutages(OutageLog.serialize(OutageLog.add(OutageLog.parse(r.loadOutages()), o)))
+            AppState.outageLogRevision.value++
+        }
+    }
+
+    /**
+     * Failover: home network has had no internet for [FAILOVER_AFTER_MS] and the other one is in range.
+     * Returns true if a switch was started.
+     */
+    private fun maybeFailover(role: Role, conn: WifiMonitor.Connection, rssi: Int?, now: Long): Boolean {
+        val since = noInternetSinceMs ?: now.also { noInternetSinceMs = it }
+        if (now - since < FAILOVER_AFTER_MS || now < failoverBlockedUntilMs || switchInProgress) return false
+        val other = monitor.bestReading(settings.ssidFor(role.other))
+        if (other == null || now - other.scanTimeMs > FAILOVER_READING_MAX_AGE_MS) {
+            if (now - lastFailoverScanMs > FAILOVER_SCAN_GAP_MS) {
+                lastFailoverScanMs = now
+                monitor.requestScan()
+            }
+            return false
+        }
+        failoverBlockedUntilMs = now + FAILOVER_PAUSE_MS
+        startFailover(role, conn.ssid, rssi, other.rssi)
+        return true
+    }
+
+    private fun startFailover(from: Role, fromSsid: String?, fromRssi: Int?, toRssi: Int) {
+        val target = from.other
+        val targetSsid = settings.ssidFor(target)
+        engine.onSwitchStarted()
+        switchInProgress = true
+        tickJob?.cancel()
+        Diagnostics.log("${from.label} has no internet; trying ${target.label}")
+
+        scope.launch {
+            try {
+                setStatus(Status(StatusKind.SWITCHING, "Switching…", "${from.label} has no internet. Trying ${target.label}."))
+                val outcome = connector.switchTo(
+                    target, targetSsid, fromRssi ?: -127, toRssi,
+                    reason = "${from.label} Wi-Fi has no internet",
+                )
+                when (outcome) {
+                    NetworkConnector.Outcome.Requested -> {
+                        if (waitUntilWorking(targetSsid)) {
+                            engine.onSwitchSucceeded(now())
+                            lastSwitchedAtMs = now()
+                            Diagnostics.count { it.copy(switchSuccesses = it.switchSuccesses + 1) }
+                            Diagnostics.log("Failover to ${target.label} worked")
+                        } else {
+                            engine.onSwitchAbandoned()
+                            Diagnostics.log("${target.label} has no internet either")
+                            recoverIfDisconnected(fromSsid)
+                        }
+                    }
+                    NetworkConnector.Outcome.Prompted -> {
+                        engine.onUserPrompted(now())
+                        promptedFrom = from
+                    }
+                    NetworkConnector.Outcome.NotSaved -> engine.onSwitchAbandoned()
+                    is NetworkConnector.Outcome.Failed -> {
+                        engine.onSwitchAbandoned()
+                        Diagnostics.log("Failover request failed: ${outcome.reason}")
+                        recoverIfDisconnected(fromSsid)
+                    }
+                }
+            } finally {
+                switchInProgress = false
+                noInternetSinceMs = null
+            }
+            evaluate()
+        }
+    }
 
     /** Alert only if Shizuku has worked before and stays unavailable past a short grace period. */
     private fun updateShizukuAlert() {
@@ -294,6 +446,9 @@ class MonitoringService : Service() {
         val now = now()
         lastEvalAtMs = now
 
+        val connNow = monitor.connection.value
+        trackOutage(if (wifiOn) settings.roleOf(connNow?.ssid) else null, connNow?.validated == true)
+
         if (!Permissions.hasPreciseLocation(this)) {
             return pauseWith(Status(StatusKind.PERMISSION_REQUIRED, "Permission required", "Precise location is needed to read Wi-Fi names and signal strength."))
         }
@@ -319,12 +474,21 @@ class MonitoringService : Service() {
             )
             lastRole = role
             promptedFrom = null
+            noInternetSinceMs = null
             Notifications.cancelSwitchPrompt(this)
             nextScanGapMs = MIN_SCAN_GAP_MS
         }
 
         val rssi = effectiveRssi(conn)
         lastRssi = rssi
+        val hasInternet = conn?.validated == true
+
+        // Failover comes before the call check: with no internet, a call isn't working anyway.
+        if (role != null && conn != null && !hasInternet) {
+            if (settings.failover && maybeFailover(role, conn, rssi, now)) return
+        } else {
+            noInternetSinceMs = null
+        }
 
         if (inCall && settings.pauseDuringCalls && role != null) {
             tickJob?.cancel()
@@ -355,8 +519,8 @@ class MonitoringService : Service() {
             is Decision.Idle -> nextScanGapMs = MIN_SCAN_GAP_MS
             else -> Unit
         }
-        setStatus(statusFor(role, rssi, conn != null, decision, now))
-        scheduleTick(role, rssi)
+        setStatus(statusFor(role, rssi, conn != null, hasInternet, decision, now))
+        scheduleTick(role, rssi, hasInternet)
     }
 
     private fun pauseWith(status: Status) {
@@ -391,11 +555,12 @@ class MonitoringService : Service() {
         if (!confirming) nextScanGapMs = (nextScanGapMs * 2).coerceAtMost(MAX_SCAN_GAP_MS)
     }
 
-    private fun scheduleTick(role: Role?, rssi: Int?) {
+    private fun scheduleTick(role: Role?, rssi: Int?, hasInternet: Boolean = true) {
         tickJob?.cancel()
         if (!screenOn || role == null) return   // dormant: events will wake us when something changes
         val weak = settings.weakDbm
         val interval = when {
+            !hasInternet -> 10_000L          // no internet: check again soon (outage log / failover)
             rssi == null -> 15_000L
             rssi >= weak + 10 -> 120_000L    // strong: safety net only
             rssi >= weak -> 30_000L          // getting close
@@ -547,9 +712,9 @@ class MonitoringService : Service() {
         }
     }
 
-    private fun statusFor(role: Role?, rssi: Int?, onWifi: Boolean, decision: Decision, now: Long): Status {
+    private fun statusFor(role: Role?, rssi: Int?, onWifi: Boolean, hasInternet: Boolean, decision: Decision, now: Long): Status {
         val signal = rssi?.let { "$it dBm" } ?: "signal unknown"
-        val note = when (decision) {
+        val note = if (!hasInternet) "No internet" else when (decision) {
             is Decision.Idle -> if (rssi != null && rssi >= settings.weakDbm) "Signal good" else decision.reason
             is Decision.Hold -> decision.reason
             is Decision.WeakNoBetter -> decision.reason

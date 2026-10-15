@@ -17,6 +17,7 @@ object Notifications {
     private const val PROMPT_ID = 2
     private const val RESUME_ID = 3
     private const val SHIZUKU_ID = 4
+    private const val NEW_DEVICE_ID = 5
     private const val CH_MONITOR = "monitor"
     private const val CH_ALERTS = "alerts"
     // New channel id: Android never lets an app raise an existing channel's importance,
@@ -80,7 +81,9 @@ object Notifications {
      * Wi-Fi panel over the current screen and the user taps the network there.
      */
     @SuppressLint("MissingPermission")
-    fun showSwitchPrompt(ctx: Context, targetLabel: String, targetSsid: String, fromRssi: Int, toRssi: Int) {
+    fun showSwitchPrompt(
+        ctx: Context, targetLabel: String, targetSsid: String, fromRssi: Int, toRssi: Int, reason: String? = null,
+    ) {
         if (!canPost(ctx)) return
         ensureChannels(ctx)
         val panel = PendingIntent.getActivity(
@@ -90,8 +93,11 @@ object Notifications {
         )
         val n = NotificationCompat.Builder(ctx, CH_SWITCH)
             .setSmallIcon(R.drawable.ic_stat_wifi)
-            .setContentTitle("$targetLabel Wi-Fi is stronger")
-            .setContentText("Tap Switch, then choose \"$targetSsid\" ($toRssi dBm vs $fromRssi dBm now)")
+            .setContentTitle(reason ?: "$targetLabel Wi-Fi is stronger")
+            .setContentText(
+                if (reason != null) "Tap Switch, then choose \"$targetSsid\""
+                else "Tap Switch, then choose \"$targetSsid\" ($toRssi dBm vs $fromRssi dBm now)"
+            )
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
             .setAutoCancel(true)
@@ -144,6 +150,23 @@ object Notifications {
     }
 
     fun cancelShizukuStopped(ctx: Context) = NotificationManagerCompat.from(ctx).cancel(SHIZUKU_ID)
+
+    /** Unknown device(s) joined the home Wi-Fi. Tapping opens the "Who's on my Wi-Fi" screen. */
+    @SuppressLint("MissingPermission")
+    fun showNewDevices(ctx: Context, networkLabel: String, devices: List<String>) {
+        if (!canPost(ctx) || devices.isEmpty()) return
+        ensureChannels(ctx)
+        val title = if (devices.size == 1) "New device on $networkLabel Wi-Fi" else "${devices.size} new devices on $networkLabel Wi-Fi"
+        val n = NotificationCompat.Builder(ctx, CH_ALERTS)
+            .setSmallIcon(R.drawable.ic_stat_wifi)
+            .setContentTitle(title)
+            .setContentText(devices.joinToString(", "))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(devices.joinToString("\n")))
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent(ctx, MainActivity.ACTION_OPEN_DEVICES))
+            .build()
+        NotificationManagerCompat.from(ctx).notify(NEW_DEVICE_ID, n)
+    }
 
     private fun canPost(ctx: Context) =
         Permissions.hasNotifications(ctx) && NotificationManagerCompat.from(ctx).areNotificationsEnabled()

@@ -28,6 +28,10 @@ data class Settings(
     val pauseDuringCalls: Boolean = true,
     /** Set once Shizuku has worked; enables the "Shizuku stopped" alert. */
     val shizukuSetUp: Boolean = false,
+    /** Move to the other home network when the current one has no internet. */
+    val failover: Boolean = true,
+    /** While charging, check for unknown devices every ~15 minutes. */
+    val newDeviceAlerts: Boolean = true,
 ) {
     val networksConfigured: Boolean
         get() = upstairsSsid.isNotBlank() && downstairsSsid.isNotBlank() && upstairsSsid != downstairsSsid
@@ -79,6 +83,12 @@ class SettingsRepository(context: Context) {
         val SHIZUKU = booleanPreferencesKey("shizuku_set_up")
         /** Auto-tune counts; kept outside [Settings] so saving them doesn't look like a settings change. */
         val TUNING = stringPreferencesKey("tuning_histogram")
+        /** Who's on my Wi-Fi: MAC addresses already seen per network (to flag new devices). */
+        val KNOWN_DEVICES = stringPreferencesKey("known_devices")
+        val FAILOVER = booleanPreferencesKey("failover")
+        val DEVICE_ALERTS = booleanPreferencesKey("new_device_alerts")
+        val OUTAGES = stringPreferencesKey("outage_log")
+        val SPEED = stringPreferencesKey("speed_history")
     }
 
     val settings: Flow<Settings> = store.data
@@ -99,10 +109,30 @@ class SettingsRepository(context: Context) {
             prefs[Keys.OBS] = s.requiredObservations
             prefs[Keys.CALLS] = s.pauseDuringCalls
             prefs[Keys.SHIZUKU] = s.shizukuSetUp
+            prefs[Keys.FAILOVER] = s.failover
+            prefs[Keys.DEVICE_ALERTS] = s.newDeviceAlerts
         }
     }
 
+    private suspend fun loadText(key: Preferences.Key<String>): String =
+        runCatching { store.data.first()[key] }.getOrNull() ?: ""
+
+    private suspend fun saveText(key: Preferences.Key<String>, value: String) {
+        runCatching { store.edit { it[key] = value } }
+    }
+
+    suspend fun loadOutages(): String = loadText(Keys.OUTAGES)
+    suspend fun saveOutages(data: String) = saveText(Keys.OUTAGES, data)
+    suspend fun loadSpeedHistory(): String = loadText(Keys.SPEED)
+    suspend fun saveSpeedHistory(data: String) = saveText(Keys.SPEED, data)
+
     suspend fun loadTuning(): String = runCatching { store.data.first()[Keys.TUNING] }.getOrNull() ?: ""
+
+    suspend fun loadKnownDevices(): String = runCatching { store.data.first()[Keys.KNOWN_DEVICES] }.getOrNull() ?: ""
+
+    suspend fun saveKnownDevices(data: String) {
+        runCatching { store.edit { it[Keys.KNOWN_DEVICES] = data } }
+    }
 
     suspend fun saveTuning(data: String) {
         runCatching { store.edit { it[Keys.TUNING] = data } }
@@ -121,6 +151,8 @@ class SettingsRepository(context: Context) {
             requiredObservations = this[Keys.OBS] ?: d.requiredObservations,
             pauseDuringCalls = this[Keys.CALLS] ?: d.pauseDuringCalls,
             shizukuSetUp = this[Keys.SHIZUKU] ?: d.shizukuSetUp,
+            failover = this[Keys.FAILOVER] ?: d.failover,
+            newDeviceAlerts = this[Keys.DEVICE_ALERTS] ?: d.newDeviceAlerts,
         )
     }
 }

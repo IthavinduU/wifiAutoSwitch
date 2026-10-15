@@ -12,12 +12,13 @@ android {
         applicationId = "app.wifiautoswitch"
         minSdk = 31          // Android 12: needed for NetworkCallback location-info flag
         targetSdk = 35       // Runs normally on Android 17 (API 37)
-        versionCode = 1
+        versionCode = 3
         versionName = "1.0"
     }
 
     buildTypes {
         release {
+            // Optimised release build. proguard-rules.pro keeps the Shizuku parts that are loaded by name.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.IBinder
 import app.wifiautoswitch.core.Ssid
 import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 /**
@@ -13,6 +14,8 @@ import kotlin.system.exitProcess
  * the Settings app uses to join a saved network, and it is what an ordinary app cannot have.
  *
  * What it does — and nothing else:
+ *  - reads the IPv4 neighbour table (`ip -4 neigh show`, a fixed read-only command) so the app can
+ *    list devices on the current Wi-Fi with their MAC addresses (hidden from normal apps since Android 10)
  *  - reads the list of saved networks (SSID + internal id only; passwords are never read or returned)
  *  - asks the Wi-Fi service to join a saved network by its id, i.e. exactly what tapping the
  *    network in Settings does. The saved profile (password, MAC randomisation, metered, auto-join)
@@ -66,6 +69,17 @@ class PrivilegedWifiService : IPrivilegedWifi.Stub() {
             val root = (t as? InvocationTargetException)?.targetException ?: t
             "error:${root.javaClass.simpleName}: ${root.message}".take(300)
         }
+    }
+
+    override fun listNeighbors(): String = try {
+        val process = ProcessBuilder("/system/bin/ip", "-4", "neigh", "show")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroy()
+        output.take(128_000)
+    } catch (t: Throwable) {
+        "error:${t.javaClass.simpleName}: ${t.message}".take(300)
     }
 
     private fun savedNetworks(): List<WifiConfiguration> {

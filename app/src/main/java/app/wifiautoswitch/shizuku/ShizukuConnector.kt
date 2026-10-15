@@ -181,6 +181,17 @@ object ShizukuConnector {
         }
     }
 
+    /** Raw neighbour-table text, an "error:..." string, or null if Shizuku isn't available. */
+    suspend fun listNeighbors(): String? = try {
+        withService { it.listNeighbors() }
+    } catch (e: TimeoutCancellationException) {
+        null
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        null
+    }
+
     suspend fun listSavedSsids(): List<String> = try {
         withService { it.listSavedSsids() }?.lines()?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
     } catch (e: TimeoutCancellationException) {

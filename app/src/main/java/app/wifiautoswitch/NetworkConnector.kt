@@ -34,7 +34,8 @@ class NetworkConnector(private val context: Context) {
 
     val mode: Mode get() = if (ShizukuConnector.isReady) Mode.AUTOMATIC else Mode.ASSISTED
 
-    suspend fun switchTo(target: Role, ssid: String, fromRssi: Int, toRssi: Int): Outcome {
+    /** [reason] replaces the default "much stronger" wording in assisted mode (e.g. for failover). */
+    suspend fun switchTo(target: Role, ssid: String, fromRssi: Int, toRssi: Int, reason: String? = null): Outcome {
         if (mode == Mode.AUTOMATIC) {
             when (val r = ShizukuConnector.connectSaved(ssid)) {
                 is ShizukuConnector.ConnectResult.Requested -> return Outcome.Requested
@@ -43,7 +44,7 @@ class NetworkConnector(private val context: Context) {
                 is ShizukuConnector.ConnectResult.Unavailable -> Unit // fall through to assisted
             }
         }
-        Notifications.showSwitchPrompt(context, target.label, ssid, fromRssi, toRssi)
+        Notifications.showSwitchPrompt(context, target.label, ssid, fromRssi, toRssi, reason)
         return Outcome.Prompted
     }
 

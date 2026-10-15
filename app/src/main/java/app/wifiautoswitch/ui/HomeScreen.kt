@@ -81,7 +81,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable
-fun HomeScreen(repo: SettingsRepository) {
+fun HomeScreen(repo: SettingsRepository, onOpenTool: (Screen) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -243,6 +243,8 @@ fun HomeScreen(repo: SettingsRepository) {
                         }
                     },
                 )
+
+                ToolsCard(onOpenTool)
 
                 SetupCard(
                     hasLocation = hasLocation,
@@ -448,6 +450,34 @@ private fun StatusCard(status: Status, switchLabel: String?, onSwitchNow: () -> 
 }
 
 @Composable
+private fun ToolsCard(onOpen: (Screen) -> Unit) {
+    SectionCard {
+        SectionLabel("Wi-Fi tools")
+        ToolRow("Who's on my Wi-Fi", "Devices on this network and their MAC addresses") { onOpen(Screen.DEVICES) }
+        ToolRow("Wi-Fi channels", "Find the least crowded channel for your routers") { onOpen(Screen.CHANNELS) }
+        ToolRow("Speed test", "Download, upload and ping; compare floors") { onOpen(Screen.SPEED) }
+        ToolRow("Internet outages", "When your internet dropped, to show your ISP") { onOpen(Screen.OUTAGES) }
+    }
+}
+
+@Composable
+private fun ToolRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+        }
+        Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
 private fun SetupCard(
     hasLocation: Boolean,
     approximateOnly: Boolean,
@@ -528,6 +558,18 @@ private fun AdvancedCard(
 
             HorizontalDivider()
             AutoTuneSection(settings.weakDbm, onApply = { v -> onUpdate { it.copy(weakDbm = v) } }, onReset = onResetTuning)
+
+            HorizontalDivider()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Switch when internet stops", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "If one router has no internet for 30 seconds, move to the other (then wait 10 minutes before trying again).",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = settings.failover, onCheckedChange = { v -> onUpdate { it.copy(failover = v) } })
+            }
 
             HorizontalDivider()
             Row(verticalAlignment = Alignment.CenterVertically) {
