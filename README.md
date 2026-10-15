@@ -1,4 +1,5 @@
 # WiFi AutoSwitch
+## Disclaimer : This is a vibe coded app using Claude. I only did some tweaks here and there. 
 
 A small Android app I built for myself so my phone always uses the stronger of my two home Wi-Fi networks, without me having to switch manually.
 
