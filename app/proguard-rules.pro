@@ -1,0 +1,3 @@
+-keep class rikka.shizuku.** { *; }
+-keep class app.wifiautoswitch.shizuku.** { *; }
+-keep class app.wifiautoswitch.core.** { *; }
