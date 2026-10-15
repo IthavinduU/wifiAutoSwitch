@@ -1,5 +1,7 @@
 # WiFi AutoSwitch
 
+## I Vibe Coded this app just for the ease of use. !
+
 A small Android app I built for myself so my phone always uses the better of my two home Wi-Fi networks, and so I can keep an eye on my home network without logging into router pages.
 
 ## Why I built this
